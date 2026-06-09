@@ -18,14 +18,12 @@ UPDATE_SCRIPT="./scripts/update-env-file.sh"
 MAX_BACKUPS=3
 
 # --- Logging Functions & Colors ---
-# Define colors for log messages
 readonly COLOR_RESET="\033[0m"
 readonly COLOR_INFO="\033[0;34m"
 readonly COLOR_SUCCESS="\033[0;32m"
 readonly COLOR_WARN="\033[1;33m"
 readonly COLOR_ERROR="\033[0;31m"
 
-# Function to log messages with a specific color and emoji
 log() {
   local color="$1"
   local emoji="$2"
@@ -37,7 +35,6 @@ log_info() { log "${COLOR_INFO}" "ℹ️" "$1"; }
 log_success() { log "${COLOR_SUCCESS}" "✅" "$1"; }
 log_warn() { log "${COLOR_WARN}" "⚠️" "$1"; }
 log_error() { log "${COLOR_ERROR}" "❌" "$1"; }
-# ------------------------------------
 
 error_handler() {
   local exit_code=$1
@@ -54,7 +51,27 @@ trap 'error_handler $? $LINENO "$BASH_COMMAND"' ERR
 
 DOCKER_ODOO_APP_NAME=$SERVICE_NAME
 
-function create_sudoers_file() {
+# --- Helper to get the original user who invoked sudo ---
+get_original_user() {
+    # 1. SUDO_USER is set by sudo (most reliable)
+    if [ -n "$SUDO_USER" ]; then
+        echo "$SUDO_USER"
+        return 0
+    fi
+
+    # 2. Try logname (works in login shells)
+    local logname_output
+    if logname_output=$(logname 2>/dev/null) && [ -n "$logname_output" ]; then
+        echo "$logname_output"
+        return 0
+    fi
+
+    # 3. Fallback to the repository owner (detected via stat)
+    echo "$REPOSITORY_OWNER"
+}
+
+# --- Create a single sudoers file ---
+create_sudoers_file() {
   local user="$1"
   local script_type="$2"
   local SCRIPT_NAME="$3"
@@ -87,7 +104,6 @@ function create_sudoers_file() {
   echo "$rule_content" > "$temp_file"
   chmod 0440 "$temp_file"
 
-  # Use a here-document to create the sudoers file content
   if ! visudo -c -f "$temp_file"; then
     log_error "Generated sudoers content for user '$user' is invalid. Aborting."
     rm -f "$temp_file"
@@ -104,7 +120,8 @@ function create_sudoers_file() {
   log_success "Sudoers file for '$user' created successfully at $target_path."
 }
 
-function main() {
+# --- Main ---
+main() {
   # Self-elevate to root if not already
   if [ "$(id -u)" -ne 0 ]; then
     log_info "Elevating permissions to root..."
@@ -117,21 +134,27 @@ function main() {
 
   log_info "Detected Odoo App Name: $DOCKER_ODOO_APP_NAME"
 
-  # Create sudoers file for the 'devops' user
+  # Create sudoers files for the 'devops' user (always)
   create_sudoers_file "devops" "scripts" "git_addons_updater"
   create_sudoers_file "devops" "scripts" "git_odoo-base_updater"
   create_sudoers_file "devops" "scripts" "deploy_release_candidate-$SERVICE_NAME"
   create_sudoers_file "devops" "scripts" "restore_backupdata-$SERVICE_NAME"
 
-  # Create sudoers file for the user who ran the script, if they are not 'devops' or 'root'
+  # Get the user who originally ran the script (before sudo)
   local logged_in_user
-  logged_in_user=$(logname)
+  logged_in_user=$(get_original_user)
+
+  # Skip if the user is root or devops (already handled)
   if [ "$logged_in_user" != "root" ] && [ "$logged_in_user" != "devops" ]; then
-    create_sudoers_file "$logged_in_user" "scripts" "git_addons_updater"
-    create_sudoers_file "$logged_in_user" "scripts" "git_odoo-base_updater"
-    create_sudoers_file "$logged_in_user" "scripts" "deploy_release_candidate-$SERVICE_NAME"
-    create_sudoers_file "$logged_in_user" "scripts" "restore_backupdata-$SERVICE_NAME"
-    create_sudoers_file "$logged_in_user" "root" "setup"
+    if id "$logged_in_user" &>/dev/null; then
+      create_sudoers_file "$logged_in_user" "scripts" "git_addons_updater"
+      create_sudoers_file "$logged_in_user" "scripts" "git_odoo-base_updater"
+      create_sudoers_file "$logged_in_user" "scripts" "deploy_release_candidate-$SERVICE_NAME"
+      create_sudoers_file "$logged_in_user" "scripts" "restore_backupdata-$SERVICE_NAME"
+      create_sudoers_file "$logged_in_user" "root" "setup"
+    else
+      log_warn "User '$logged_in_user' does not exist. Skipping sudoers for this user."
+    fi
   fi
 
   log_success "Finished updating sudoers configurations."
